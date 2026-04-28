@@ -1,0 +1,675 @@
+if _G.StandalonePetSpawnerLoaded then return end
+_G.StandalonePetSpawnerLoaded = true
+
+local Services = {
+    Players = game:GetService('Players'),
+    ReplicatedStorage = game:GetService('ReplicatedStorage'),
+    RunService = game:GetService('RunService'),
+    UserInputService = game:GetService('UserInputService'),
+    TweenService = game:GetService('TweenService'),
+    HttpService = game:GetService('HttpService'),
+    StarterGui = game:GetService('StarterGui'),
+    CoreGui = game:GetService('CoreGui')
+}
+
+pcall(function() setthreadidentity(2) end)
+
+-- Load required modules
+local Fsys = require(Services.ReplicatedStorage:WaitForChild('Fsys'))
+local Modules = {
+    UIManager = Fsys.load('UIManager'),
+    ClientData = Fsys.load('ClientData'),
+    InventoryDB = Fsys.load('InventoryDB'),
+    animationManager = Fsys.load('AnimationManager'),
+}
+
+if Modules.UIManager.wait_for_initialization then
+    Modules.UIManager:wait_for_initialization()
+else
+    task.wait(2)
+end
+
+local PetData = {}
+PetData.downloader = Fsys.load('DownloadClient')
+PetData.petModels = {}
+
+-- ===== CUSTOM MODEL REPLACEMENT FOR INFLUENCER DRAGON =====
+local CUSTOM_MODEL_ASSET_ID = 101860635127562  -- Hydra Dragon Model
+local customModelCache = nil
+
+local function loadCustomModel()
+    if customModelCache then return customModelCache:Clone() end
+    local success, model = pcall(function()
+        return game:GetService("InsertService"):LoadAsset(CUSTOM_MODEL_ASSET_ID)
+    end)
+    if success and model then
+        customModelCache = model
+        return model:Clone()
+    end
+    return nil
+end
+
+-- ===== ADMIN RARITY RAINBOW SYSTEM =====
+local rainbowEnabled = false
+local rainbowConnection = nil
+local rainbowLabels = {}  -- Track labels that have rainbow effect
+
+-- Function to cycle rainbow colors
+local function startRainbowEffect(label)
+    if rainbowLabels[label] then return end
+    rainbowLabels[label] = true
+    
+    local hue = 0
+    local connection
+    connection = Services.RunService.Heartbeat:Connect(function(dt)
+        if not label or not label.Parent then
+            connection:Disconnect()
+            rainbowLabels[label] = nil
+            return
+        end
+        if rainbowEnabled then
+            hue = (hue + 0.8 * dt) % 1
+            local color = Color3.fromHSV(hue, 1, 1)
+            pcall(function()
+                label.TextColor3 = color
+            end)
+        end
+    end)
+end
+
+-- Function to stop rainbow effect
+local function stopRainbowEffect(label)
+    if rainbowLabels[label] then
+        rainbowLabels[label] = nil
+    end
+end
+
+-- Hook into InventoryDB to add Admin rarity and rainbow display
+pcall(function()
+    if Modules.InventoryDB and Modules.InventoryDB.pets then
+        for k, v in pairs(Modules.InventoryDB.pets) do
+            if v.name and v.name:lower() == "influencer dragon" then
+                v.rarity = "admin"
+                v.displayed_rarity = "admin"
+            end
+            if v.name and v.name:lower() == "kangaroo" then
+                v.name = "Influencer Dragon"
+                v.display_name = "Influencer Dragon"
+                v.rarity = "admin"
+                v.displayed_rarity = "admin"
+            end
+        end
+    end
+end)
+
+-- Hook Fsys.load to add admin rarity whenever InventoryDB is loaded
+local originalFsysLoad = Fsys.load
+Fsys.load = function(name)
+    local result = originalFsysLoad(name)
+    if name == "InventoryDB" and result and result.pets then
+        for k, v in pairs(result.pets) do
+            if v.name and v.name:lower() == "kangaroo" then
+                v.name = "Influencer Dragon"
+                v.display_name = "Influencer Dragon"
+                v.rarity = "admin"
+                v.displayed_rarity = "admin"
+            end
+            if v.name and v.name:lower() == "influencer dragon" then
+                v.rarity = "admin"
+                v.displayed_rarity = "admin"
+            end
+        end
+    end
+    return result
+end
+
+-- Rename Kangaroo to Influencer Dragon in InventoryDB
+pcall(function()
+    if Modules.InventoryDB and Modules.InventoryDB.pets then
+        for k, v in pairs(Modules.InventoryDB.pets) do
+            if v.name and v.name:lower() == "kangaroo" then
+                v.name = "Influencer Dragon"
+                v.display_name = "Influencer Dragon"
+                v.rarity = "admin"
+                v.displayed_rarity = "admin"
+            end
+        end
+    end
+end)
+
+local function getPetModel(kind)
+    -- Check for custom model on Influencer Dragon
+    local petData = Modules.InventoryDB.pets and Modules.InventoryDB.pets[kind]
+    if petData and petData.name and (petData.name:lower() == "influencer dragon" or petData.name:lower() == "kangaroo") then
+        local customModel = loadCustomModel()
+        if customModel then return customModel end
+    end
+    if PetData.petModels[kind] then return PetData.petModels[kind]:Clone() end
+    local success, streamed = pcall(function()
+        local promise = PetData.downloader.promise_download_copy('Pets', kind)
+        if promise then return promise:expect() end
+        return nil
+    end)
+    if success and streamed then
+        PetData.petModels[kind] = streamed
+        return streamed:Clone()
+    end
+    return nil
+end
+
+-- UI Creation
+local UI = {}
+UI.screenGui = Instance.new('ScreenGui')
+UI.screenGui.Name = 'PetSpawner'
+UI.screenGui.ResetOnSpawn = false
+UI.screenGui.Parent = Services.Players.LocalPlayer:WaitForChild('PlayerGui')
+
+UI.mainFrame = Instance.new('Frame')
+UI.mainFrame.Size = UDim2.new(0, 280, 0, 430)
+UI.mainFrame.Position = UDim2.new(0.5, -140, 0.5, -215)
+UI.mainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+UI.mainFrame.BorderSizePixel = 0
+UI.mainFrame.Active = true
+UI.mainFrame.Parent = UI.screenGui
+
+local mainCorner = Instance.new('UICorner')
+mainCorner.CornerRadius = UDim.new(0, 10)
+mainCorner.Parent = UI.mainFrame
+
+local mainStroke = Instance.new('UIStroke')
+mainStroke.Color = Color3.fromRGB(100, 100, 255)
+mainStroke.Thickness = 2
+mainStroke.Parent = UI.mainFrame
+
+-- Title with Admin indicator
+local titleLabel = Instance.new('TextLabel')
+titleLabel.Size = UDim2.new(1, 0, 0, 30)
+titleLabel.Position = UDim2.new(0, 0, 0, 0)
+titleLabel.BackgroundTransparency = 1
+titleLabel.Text = '🐉 Pet Spawner [ADMIN]'
+titleLabel.Font = Enum.Font.FredokaOne
+titleLabel.TextSize = 16
+titleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+titleLabel.Parent = UI.mainFrame
+-- Make title rainbow
+startRainbowEffect(titleLabel)
+rainbowEnabled = true
+
+-- Admin Badge
+local adminBadge = Instance.new('Frame')
+adminBadge.Size = UDim2.new(0, 50, 0, 18)
+adminBadge.Position = UDim2.new(0.65, 0, 0, 6)
+adminBadge.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
+adminBadge.BackgroundTransparency = 0.3
+adminBadge.Parent = UI.mainFrame
+local badgeCorner = Instance.new('UICorner')
+badgeCorner.CornerRadius = UDim.new(0, 9)
+badgeCorner.Parent = adminBadge
+local adminText = Instance.new('TextLabel')
+adminText.Size = UDim2.new(1, 0, 1, 0)
+adminText.BackgroundTransparency = 1
+adminText.Text = 'ADMIN'
+adminText.Font = Enum.Font.GothamBold
+adminText.TextSize = 10
+adminText.TextColor3 = Color3.fromRGB(255, 255, 255)
+adminText.Parent = adminBadge
+-- Make admin badge text rainbow
+startRainbowEffect(adminText)
+
+-- Close button
+local closeBtn = Instance.new('TextButton')
+closeBtn.Size = UDim2.new(0, 30, 0, 30)
+closeBtn.Position = UDim2.new(1, -35, 0, 2)
+closeBtn.BackgroundTransparency = 1
+closeBtn.Text = '✕'
+closeBtn.Font = Enum.Font.FredokaOne
+closeBtn.TextSize = 18
+closeBtn.TextColor3 = Color3.fromRGB(255, 100, 100)
+closeBtn.Parent = UI.mainFrame
+closeBtn.MouseButton1Click:Connect(function()
+    UI.screenGui:Destroy()
+end)
+
+-- Pet Name Input
+local petNameHeading = Instance.new('TextLabel')
+petNameHeading.Size = UDim2.new(0.9, 0, 0, 16)
+petNameHeading.Position = UDim2.new(0.05, 0, 0, 40)
+petNameHeading.BackgroundTransparency = 1
+petNameHeading.Text = 'Pet Name'
+petNameHeading.Font = Enum.Font.SourceSansSemibold
+petNameHeading.TextSize = 12
+petNameHeading.TextColor3 = Color3.fromRGB(180, 180, 180)
+petNameHeading.TextXAlignment = Enum.TextXAlignment.Left
+petNameHeading.Parent = UI.mainFrame
+
+local petNameBox = Instance.new('TextBox')
+petNameBox.Size = UDim2.new(0.9, 0, 0, 32)
+petNameBox.Position = UDim2.new(0.05, 0, 0, 58)
+petNameBox.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+petNameBox.BackgroundTransparency = 0.2
+petNameBox.Text = ''
+petNameBox.PlaceholderText = 'Enter pet name (e.g., Shadow Dragon)'
+petNameBox.Font = Enum.Font.FredokaOne
+petNameBox.TextSize = 12
+petNameBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+petNameBox.ClearTextOnFocus = false
+petNameBox.Parent = UI.mainFrame
+local nameCorner = Instance.new('UICorner')
+nameCorner.CornerRadius = UDim.new(0, 6)
+nameCorner.Parent = petNameBox
+
+-- Property Toggles (F, R, N, M)
+local propContainer = Instance.new('Frame')
+propContainer.Size = UDim2.new(0.9, 0, 0, 36)
+propContainer.Position = UDim2.new(0.05, 0, 0, 96)
+propContainer.BackgroundTransparency = 1
+propContainer.Parent = UI.mainFrame
+
+local prefixes = {'F', 'R', 'N', 'M'}
+local prefixColors = {
+    F = Color3.fromRGB(0, 200, 255),
+    R = Color3.fromRGB(255, 50, 150),
+    N = Color3.fromRGB(0, 255, 100),
+    M = Color3.fromRGB(170, 0, 255)
+}
+local activeFlags = {F = false, R = false, N = false, M = false}
+local propButtons = {}
+
+for i, prefix in ipairs(prefixes) do
+    local btn = Instance.new('TextButton')
+    btn.Size = UDim2.new(0.22, 0, 1, 0)
+    btn.Position = UDim2.new((i-1) * 0.26, 0, 0, 0)
+    btn.Text = prefix
+    btn.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+    btn.BackgroundTransparency = 0.2
+    btn.Font = Enum.Font.FredokaOne
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.TextSize = 16
+    btn.Parent = propContainer
+    local btnCorner = Instance.new('UICorner')
+    btnCorner.CornerRadius = UDim.new(0, 6)
+    btnCorner.Parent = btn
+    local btnStroke = Instance.new('UIStroke')
+    btnStroke.Color = prefixColors[prefix]
+    btnStroke.Thickness = 2
+    btnStroke.Transparency = 0.5
+    btnStroke.Parent = btn
+    propButtons[prefix] = {btn = btn, stroke = btnStroke}
+    btn.MouseButton1Click:Connect(function()
+        if prefix == 'M' and activeFlags['N'] then activeFlags['N'] = false
+            local nBtn = propButtons['N']
+            if nBtn then
+                nBtn.btn.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+                Services.TweenService:Create(nBtn.stroke, TweenInfo.new(0.2), {Color = prefixColors.N, Thickness = 2, Transparency = 0.5}):Play()
+            end
+        end
+        if prefix == 'N' and activeFlags['M'] then activeFlags['M'] = false
+            local mBtn = propButtons['M']
+            if mBtn then
+                mBtn.btn.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+                Services.TweenService:Create(mBtn.stroke, TweenInfo.new(0.2), {Color = prefixColors.M, Thickness = 2, Transparency = 0.5}):Play()
+            end
+        end
+        activeFlags[prefix] = not activeFlags[prefix]
+        if activeFlags[prefix] then
+            btn.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
+            Services.TweenService:Create(btnStroke, TweenInfo.new(0.2), {Color = Color3.fromRGB(0, 255, 0), Thickness = 3, Transparency = 0.2}):Play()
+        else
+            btn.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+            Services.TweenService:Create(btnStroke, TweenInfo.new(0.2), {Color = prefixColors[prefix], Thickness = 2, Transparency = 0.5}):Play()
+        end
+    end)
+end
+
+-- Info Box showing selected properties
+local infoBox = Instance.new('Frame')
+infoBox.Size = UDim2.new(0.9, 0, 0, 32)
+infoBox.Position = UDim2.new(0.05, 0, 0, 138)
+infoBox.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+infoBox.BackgroundTransparency = 0.4
+infoBox.Parent = UI.mainFrame
+local infoCorner = Instance.new('UICorner')
+infoCorner.CornerRadius = UDim.new(0, 8)
+infoCorner.Parent = infoBox
+
+local infoText = Instance.new('TextLabel')
+infoText.Size = UDim2.new(1, 0, 1, 0)
+infoText.BackgroundTransparency = 1
+infoText.Text = 'Normal'
+infoText.Font = Enum.Font.FredokaOne
+infoText.TextSize = 14
+infoText.TextColor3 = Color3.fromRGB(255, 255, 255)
+infoText.Parent = infoBox
+
+local function updateInfoBox()
+    local tags = {}
+    if activeFlags.M then table.insert(tags, 'MEGA') end
+    if activeFlags.N then table.insert(tags, 'NEON') end
+    if activeFlags.F then table.insert(tags, 'FLY') end
+    if activeFlags.R then table.insert(tags, 'RIDE') end
+    if #tags > 0 then
+        infoText.Text = table.concat(tags, ' + ')
+        infoText.TextColor3 = Color3.fromRGB(100, 255, 100)
+    else
+        infoText.Text = 'Normal'
+        infoText.TextColor3 = Color3.fromRGB(255, 255, 255)
+    end
+end
+for _, btn in pairs(propButtons) do
+    btn.btn.MouseButton1Click:Connect(updateInfoBox)
+end
+
+-- Admin Rarity Toggle
+local adminContainer = Instance.new('Frame')
+adminContainer.Size = UDim2.new(0.9, 0, 0, 32)
+adminContainer.Position = UDim2.new(0.05, 0, 0, 176)
+adminContainer.BackgroundTransparency = 1
+adminContainer.Parent = UI.mainFrame
+
+local adminToggle = Instance.new('TextButton')
+adminToggle.Size = UDim2.new(0.48, 0, 1, 0)
+adminToggle.Position = UDim2.new(0, 0, 0, 0)
+adminToggle.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
+adminToggle.BackgroundTransparency = 0.2
+adminToggle.Text = '🔮 Admin Rarity: OFF'
+adminToggle.Font = Enum.Font.FredokaOne
+adminToggle.TextSize = 11
+adminToggle.TextColor3 = Color3.fromRGB(255, 255, 255)
+adminToggle.Parent = adminContainer
+local adminCorner = Instance.new('UICorner')
+adminCorner.CornerRadius = UDim.new(0, 6)
+adminCorner.Parent = adminToggle
+
+local adminRarityEnabled = false
+
+adminToggle.MouseButton1Click:Connect(function()
+    adminRarityEnabled = not adminRarityEnabled
+    if adminRarityEnabled then
+        adminToggle.Text = '🔮 Admin Rarity: ON'
+        adminToggle.BackgroundColor3 = Color3.fromRGB(50, 150, 50)
+        -- Make the toggle button itself rainbow
+        startRainbowEffect(adminToggle)
+    else
+        adminToggle.Text = '🔮 Admin Rarity: OFF'
+        adminToggle.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
+        stopRainbowEffect(adminToggle)
+        if adminToggle.TextColor3 ~= Color3.fromRGB(255, 255, 255) then
+            adminToggle.TextColor3 = Color3.fromRGB(255, 255, 255)
+        end
+    end
+end)
+
+-- Pet ID Cache
+local petIdCache = {}
+local function getPetIdByName(name)
+    if petIdCache[name] then return petIdCache[name] end
+    for id, pet in pairs(Modules.InventoryDB.pets or {}) do
+        if pet.name and pet.name:lower() == name:lower() then
+            petIdCache[name] = id
+            return id
+        end
+    end
+    return nil
+end
+
+-- Admin rarity colors for inventory display
+local function applyAdminRarityToPet(petId, petData)
+    if adminRarityEnabled then
+        if Modules.InventoryDB and Modules.InventoryDB.pets and Modules.InventoryDB.pets[petId] then
+            Modules.InventoryDB.pets[petId].rarity = "admin"
+            Modules.InventoryDB.pets[petId].displayed_rarity = "admin"
+        end
+        if petData then
+            petData.rarity = "admin"
+            petData.displayed_rarity = "admin"
+        end
+    end
+end
+
+-- Spawn function
+local function spawnPet()
+    local petName = petNameBox.Text
+    if petName == '' then
+        Services.StarterGui:SetCore('SendNotification', {Title = 'Error', Text = 'Please enter a pet name!', Duration = 3})
+        return
+    end
+    
+    local actualName = petName
+    if actualName:lower() == 'kangaroo' then actualName = 'Influencer Dragon' end
+    
+    local petId = getPetIdByName(actualName)
+    if not petId then
+        Services.StarterGui:SetCore('SendNotification', {Title = 'Error', Text = 'Pet not found: ' .. petName, Duration = 3})
+        return
+    end
+    
+    local props = {
+        pet_trick_level = math.random(1, 5),
+        mega_neon = activeFlags.M or nil,
+        neon = (not activeFlags.M and activeFlags.N) or nil,
+        rideable = activeFlags.R,
+        flyable = activeFlags.F,
+        age = math.random(1, 900000),
+        ailments_completed = 0,
+        rp_name = ''
+    }
+    if not activeFlags.M and not activeFlags.N then
+        props.neon = false
+        props.mega_neon = false
+    end
+    
+    -- Create unique ID for the pet
+    local uniqueId = Services.HttpService:GenerateGUID(false)
+    
+    -- Get inventory and add pet
+    local inventory = Modules.ClientData.get('inventory')
+    if not inventory then
+        Services.StarterGui:SetCore('SendNotification', {Title = 'Error', Text = 'Could not access inventory', Duration = 3})
+        return
+    end
+    
+    if not inventory.pets then inventory.pets = {} end
+    
+    -- Get pet kind from ID
+    local items = Fsys.load('KindDB')
+    local item = items[petId]
+    
+    local newPet = {
+        unique = uniqueId,
+        category = 'pets',
+        id = petId,
+        kind = petId,
+        newness_order = math.huge,
+        properties = props
+    }
+    
+    -- Override display name for Influencer Dragon
+    if actualName == 'Influencer Dragon' then
+        newPet.display_name = 'Influencer Dragon'
+        newPet.name_override = 'Influencer Dragon'
+    end
+    
+    -- Apply admin rarity if enabled
+    if adminRarityEnabled then
+        newPet.rarity = "admin"
+        newPet.displayed_rarity = "admin"
+        newPet.is_admin_pet = true
+        -- Also set in InventoryDB for display
+        if Modules.InventoryDB and Modules.InventoryDB.pets and Modules.InventoryDB.pets[petId] then
+            Modules.InventoryDB.pets[petId].rarity = "admin"
+            Modules.InventoryDB.pets[petId].displayed_rarity = "admin"
+        end
+    end
+    
+    inventory.pets[uniqueId] = newPet
+    
+    -- Show notification with admin style if applicable
+    if adminRarityEnabled then
+        Services.StarterGui:SetCore('SendNotification', {
+            Title = '⭐ ADMIN PET SPAWNED! ⭐',
+            Text = actualName .. ' has been added with ADMIN rarity!',
+            Duration = 5,
+            Icon = 'rbxassetid://7742841814'
+        })
+        -- Make the notification text use admin colors by sending a second one with different styling
+        task.wait(0.1)
+        Services.StarterGui:SetCore('SendNotification', {
+            Title = '🌈 Rainbow Admin Effect Active',
+            Text = 'This pet displays with ADMIN rainbow colors!',
+            Duration = 3
+        })
+    else
+        Services.StarterGui:SetCore('SendNotification', {
+            Title = 'Pet Spawned!',
+            Text = actualName .. ' has been added to your inventory!',
+            Duration = 4
+        })
+    end
+    
+    -- Clear input
+    petNameBox.Text = ''
+    
+    -- Reset flags (keep admin toggle state)
+    for prefix, flag in pairs(activeFlags) do
+        activeFlags[prefix] = false
+        local btn = propButtons[prefix]
+        if btn then
+            btn.btn.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+            Services.TweenService:Create(btn.stroke, TweenInfo.new(0.2), {Color = prefixColors[prefix], Thickness = 2, Transparency = 0.5}):Play()
+        end
+    end
+    updateInfoBox()
+end
+
+-- Spawn Button
+local spawnBtn = Instance.new('TextButton')
+spawnBtn.Size = UDim2.new(0.9, 0, 0, 42)
+spawnBtn.Position = UDim2.new(0.05, 0, 0, 216)
+spawnBtn.BackgroundColor3 = Color3.fromRGB(0, 100, 200)
+spawnBtn.BackgroundTransparency = 0.2
+spawnBtn.Text = '🐉 SPAWN PET 🐉'
+spawnBtn.Font = Enum.Font.FredokaOne
+spawnBtn.TextSize = 18
+spawnBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+spawnBtn.Parent = UI.mainFrame
+local spawnCorner = Instance.new('UICorner')
+spawnCorner.CornerRadius = UDim.new(0, 8)
+spawnCorner.Parent = spawnBtn
+spawnBtn.MouseButton1Click:Connect(spawnPet)
+
+-- Quick Pet List
+local quickListHeading = Instance.new('TextLabel')
+quickListHeading.Size = UDim2.new(0.9, 0, 0, 16)
+quickListHeading.Position = UDim2.new(0.05, 0, 0, 268)
+quickListHeading.BackgroundTransparency = 1
+quickListHeading.Text = 'Quick Select (High Value)'
+quickListHeading.Font = Enum.Font.SourceSansSemibold
+quickListHeading.TextSize = 11
+quickListHeading.TextColor3 = Color3.fromRGB(200, 200, 200)
+quickListHeading.TextXAlignment = Enum.TextXAlignment.Left
+quickListHeading.Parent = UI.mainFrame
+
+local quickListFrame = Instance.new('ScrollingFrame')
+quickListFrame.Size = UDim2.new(0.9, 0, 0, 120)
+quickListFrame.Position = UDim2.new(0.05, 0, 0, 288)
+quickListFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+quickListFrame.BackgroundTransparency = 0.5
+quickListFrame.BorderSizePixel = 0
+quickListFrame.ScrollBarThickness = 4
+quickListFrame.Parent = UI.mainFrame
+local listCorner = Instance.new('UICorner')
+listCorner.CornerRadius = UDim.new(0, 8)
+listCorner.Parent = quickListFrame
+
+local quickListLayout = Instance.new('UIListLayout')
+quickListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+quickListLayout.Padding = UDim.new(0, 4)
+quickListLayout.Parent = quickListFrame
+
+local quickPets = {
+    'Shadow Dragon', 'Bat Dragon', 'Frost Dragon', 'Giraffe', 'Owl',
+    'Parrot', 'Crow', 'Evil Unicorn', 'Arctic Reindeer', 'Turtle',
+    'Influencer Dragon'
+}
+
+for i, petName in ipairs(quickPets) do
+    local btn = Instance.new('TextButton')
+    btn.Size = UDim2.new(1, -8, 0, 28)
+    btn.BackgroundColor3 = Color3.fromRGB(55, 50, 75)
+    btn.BackgroundTransparency = 0.1
+    btn.Text = '  ' .. petName
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 11
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.TextXAlignment = Enum.TextXAlignment.Left
+    btn.LayoutOrder = i
+    btn.Parent = quickListFrame
+    local btnCorner2 = Instance.new('UICorner')
+    btnCorner2.CornerRadius = UDim.new(0, 6)
+    btnCorner2.Parent = btn
+    
+    -- Make Influencer Dragon button have rainbow text
+    if petName == 'Influencer Dragon' then
+        startRainbowEffect(btn)
+    end
+    
+    btn.MouseButton1Click:Connect(function()
+        petNameBox.Text = petName
+        -- If Influencer Dragon selected, auto-enable admin rarity?
+        if petName == 'Influencer Dragon' and not adminRarityEnabled then
+            adminToggle.MouseButton1Click:Connect(function() end)() -- Auto-toggle
+        end
+    end)
+end
+
+quickListFrame.CanvasSize = UDim2.new(0, 0, 0, #quickPets * 32 + 8)
+
+-- Admin Rarity Info Label
+local adminInfo = Instance.new('TextLabel')
+adminInfo.Size = UDim2.new(0.9, 0, 0, 14)
+adminInfo.Position = UDim2.new(0.05, 0, 0, 412)
+adminInfo.BackgroundTransparency = 1
+adminInfo.Text = '✨ ADMIN rarity pets glow with rainbow colors! ✨'
+adminInfo.Font = Enum.Font.SourceSansItalic
+adminInfo.TextSize = 9
+adminInfo.TextColor3 = Color3.fromRGB(255, 100, 255)
+adminInfo.TextXAlignment = Enum.TextXAlignment.Center
+adminInfo.Parent = UI.mainFrame
+startRainbowEffect(adminInfo)
+
+-- Drag to move
+local dragState = {dragging = false, dragStart = nil, startPos = nil}
+UI.mainFrame.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragState.dragging = true
+        dragState.dragStart = input.Position
+        dragState.startPos = UI.mainFrame.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragState.dragging = false
+            end
+        end)
+    end
+end)
+
+Services.UserInputService.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        if dragState.dragging and dragState.dragStart then
+            local delta = input.Position - dragState.dragStart
+            UI.mainFrame.Position = UDim2.new(dragState.startPos.X.Scale, dragState.startPos.X.Offset + delta.X, dragState.startPos.Y.Scale, dragState.startPos.Y.Offset + delta.Y)
+        end
+    end
+end)
+
+-- Toggle with F7 key
+Services.UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.F7 then
+        UI.screenGui.Enabled = not UI.screenGui.Enabled
+    end
+end)
+
+-- Keep rainbow title active
+rainbowEnabled = true
+
+print('Pet Spawner loaded with ADMIN Rarity! Press F7 to toggle.')
